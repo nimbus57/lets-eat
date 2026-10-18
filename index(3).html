@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Isometric Prototype</title>
+<style>html,body{margin:0}[hidden]{display:none!important}</style>
+</head>
+<body>
+
+<style>
+  /* Layout: full-bleed 3D view, HUD top-left, minimap bottom-right. */
+  :root {
+    --bg: #c9ddd0;
+    --hud-bg: rgba(250, 252, 250, 0.82);
+    --hud-fg: #1d2a23;
+    --hud-dim: #55665c;
+    --hud-rule: rgba(29, 42, 35, 0.18);
+    --accent: #2b6b4c;
+    --map-bg: rgba(14, 22, 18, 0.94);
+    --toast-bg: #1d2a23;
+    --toast-fg: #f3f7f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101713;
+      --hud-bg: rgba(18, 26, 21, 0.8);
+      --hud-fg: #e6eee8;
+      --hud-dim: #9db0a4;
+      --hud-rule: rgba(230, 238, 232, 0.2);
+      --accent: #7fd5a6;
+      --map-bg: rgba(8, 13, 10, 0.94);
+      --toast-bg: #e6eee8;
+      --toast-fg: #14201a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101713;
+    --hud-bg: rgba(18, 26, 21, 0.8);
+    --hud-fg: #e6eee8;
+    --hud-dim: #9db0a4;
+    --hud-rule: rgba(230, 238, 232, 0.2);
+    --accent: #7fd5a6;
+    --map-bg: rgba(8, 13, 10, 0.94);
+    --toast-bg: #e6eee8;
+    --toast-fg: #14201a;
+    color-scheme: dark;
+  }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--hud-fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #view { position: absolute; inset: 0; }
+  #view canvas { display: block; width: 100%; height: 100%; }
+
+  #hud {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    padding: 10px 14px;
+    background: var(--hud-bg);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.65;
+    pointer-events: none;
+  }
+  #hud b { color: var(--accent); font-weight: 600; }
+  #hud .dim { color: var(--hud-dim); }
+  #inv { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hud-rule); min-width: 150px; }
+  #inv div { display: flex; justify-content: space-between; gap: 20px; font-variant-numeric: tabular-nums; }
+  #inv .n { color: var(--hud-dim); }
+
+  #minimap-wrap {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    width: 220px;
+    pointer-events: none;
+  }
+  #minimap { display: block; width: 220px; height: 220px; }
+  #minimap-caption {
+    margin-top: 2px;
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--hud-fg);
+    background: var(--hud-bg);
+    border-radius: 6px;
+    padding: 3px 8px;
+    width: max-content;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  #toast {
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    transform: translate(-50%, -12px);
+    padding: 9px 16px;
+    border-radius: 8px;
+    background: var(--toast-bg);
+    color: var(--toast-fg);
+    font-size: 14px;
+    opacity: 0;
+    transition: opacity 0.35s, transform 0.35s;
+    pointer-events: none;
+    max-width: calc(100% - 32px);
+    text-align: center;
+  }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+  @media (prefers-reduced-motion: reduce) {
+    #toast { transition: none; }
+  }
+  @media (max-width: 520px) {
+    #minimap-wrap, #minimap { width: 170px; }
+    #minimap { height: 170px; }
+  }
+</style>
+
+<div id="view"></div>
+<div id="hud">
+  <div><b>Move</b> WASD / arrows</div>
+  <div><b>Camera</b> Q / E, or right-drag</div>
+  <div><b>Minimap</b> M show/hide &middot; N north-up / rotating</div>
+  <div class="dim">Map is 80 &times; 80 m</div>
+  <div id="inv" hidden></div>
+</div>
+<div id="minimap-wrap">
+  <canvas id="minimap" width="220" height="220"></canvas>
+  <div id="minimap-caption">North-up</div>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ===================== Constants (1 unit = 1 metre) =====================
+  const MAP_HALF = 40;            // map is 80 x 80 m, centred on origin
+  const PLAYER_R = 0.5;
+  const MOVE_SPEED = 5.5;         // m/s
+  const ROTATE_SPEED = 1.6;       // rad/s
+  const REVEAL_R = 10;            // m, how far around you the map is revealed
+  const HITS_TO_BREAK = 3;
+  const REACH = 1.2;              // m from body centre to rock surface
+  const ARC_HALF = Math.PI / 4;   // strike arc is 90 degrees, centred on facing
+  const SWING_TIME = 0.4;         // s, movement is locked for this long
+  const HIT_TIME = 0.28;          // s into the swing when the hit lands
+  // Map orientation: North = -Z, East = +X.
+
+  // ===================== Renderer / scene =====================
+  const view = document.getElementById('view');
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  view.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1f2d27); // the void beyond the map edge
+
+  // ===================== Camera =====================
+  const frustumSize = 16;
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1000);
+  const ISO_PITCH = Math.atan(1 / Math.sqrt(2));
+  const CAM_DISTANCE = 30;
+  let camYaw = Math.PI / 4;
+
+  function resize() {
+    const w = window.innerWidth, h = window.innerHeight;
+    const aspect = w / h;
+    camera.left = -frustumSize * aspect / 2;
+    camera.right = frustumSize * aspect / 2;
+    camera.top = frustumSize / 2;
+    camera.bottom = -frustumSize / 2;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
+  window.addEventListener('resize', resize);
+
+  // ===================== Lights =====================
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const sun = new THREE.DirectionalLight(0xfff2d8, 0.6);
+  sun.position.set(14, 24, 8);
+  scene.add(sun);
+
+  // ===================== Ground =====================
+  function makeGridTexture() {
+    const size = 512;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    g.fillStyle = '#7fb894';
+    g.fillRect(0, 0, size, size);
+    g.strokeStyle = 'rgba(0,0,0,0.12)';
+    g.lineWidth = 2;
+    const step = size / 8;
+    for (let i = 0; i <= 8; i++) {
+      g.beginPath(); g.moveTo(i * step, 0); g.lineTo(i * step, size); g.stroke();
+      g.beginPath(); g.moveTo(0, i * step); g.lineTo(size, i * step); g.stroke();
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(MAP_HALF * 2 / 8, MAP_HALF * 2 / 8); // 1 m grid cells
+    return tex;
+  }
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(MAP_HALF * 2, MAP_HALF * 2),
+    new THREE.MeshStandardMaterial({ map: makeGridTexture() })
+  );
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+
+  // Low rim marking the map edge
+  const rimMat = new THREE.MeshStandardMaterial({ color: 0x3f5a4b });
+  const rimT = 0.6, rimH = 0.5, rimLen = MAP_HALF * 2 + rimT * 2;
+  [
+    [0, -MAP_HALF - rimT / 2, rimLen, rimT],
+    [0,  MAP_HALF + rimT / 2, rimLen, rimT],
+    [-MAP_HALF - rimT / 2, 0, rimT, rimLen],
+    [ MAP_HALF + rimT / 2, 0, rimT, rimLen],
+  ].forEach(([x, z, w, d]) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, rimH, d), rimMat);
+    m.position.set(x, rimH / 2, z);
+    scene.add(m);
+  });
+
+  // ===================== Random sources =====================
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rand = mulberry32(20261017);      // world layout (same every load)
+  const propRand = mulberry32(7771017);   // rock condition (same every load)
+
+  // ===================== Colliders & rocks =====================
+  const colliders = []; // {x, z, r}; rocks are in here too
+  const rocks = [];
+
+  const LANDMARK = { x: 24, z: -26 };
+  const LANDMARK_EDGE = 3.8;
+
+  // Three rock sizes; every rock gives a fixed amount of stone for its size.
+  const SIZES = [
+    { name: 'small',  r: 0.85, yield: 5 },
+    { name: 'medium', r: 1.2,  yield: 10 },
+    { name: 'large',  r: 1.7,  yield: 15 },
+  ];
+  function sizeFor(raw) { return raw < 1.1 ? SIZES[0] : (raw < 1.45 ? SIZES[1] : SIZES[2]); }
+
+  function addChips(rock, count) {
+    for (let i = 0; i < count; i++) {
+      const size = 0.07 + propRand() * 0.12;
+      const chip = new THREE.Mesh(new THREE.DodecahedronGeometry(size, 0), rock.mat);
+      const a = propRand() * Math.PI * 2;
+      const d = rock.r * (0.9 + propRand() * 0.7);
+      chip.position.set(rock.x + Math.cos(a) * d, size * 0.4, rock.z + Math.sin(a) * d);
+      chip.rotation.set(propRand() * 3, propRand() * 3, propRand() * 3);
+      scene.add(chip);
+      rock.chips.push(chip);
+    }
+  }
+
+  function addRock(x, z, rawR) {
+    const size = sizeFor(rawR);
+    const r = size.r;
+    const shade = 0.5 + rand() * 0.14;
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(shade, shade * 1.02, shade * 0.98),
+      flatShading: true,
+    });
+    const mesh = new THREE.Mesh(new THREE.DodecahedronGeometry(1, 0), mat);
+    mesh.scale.set(r, r * (0.7 + rand() * 0.2), r);
+    mesh.position.set(x, r * 0.35, z);
+    mesh.rotation.set(rand() * 0.4, rand() * Math.PI * 2, rand() * 0.4);
+    scene.add(mesh);
+
+    // Some rocks are solid; breakable ones may already carry 1 or 2 hits of damage.
+    const breakable = propRand() < 0.8;
+    let pre = 0;
+    if (breakable) { const q = propRand(); pre = q < 0.55 ? 0 : (q < 0.85 ? 1 : 2); }
+
+    const rock = { x, z, r, size: size.name, yield: size.yield, mesh, mat, breakable, hp: HITS_TO_BREAK - pre,
+                   chips: [], shake: 0, baseY: r * 0.35, revealed: false };
+    for (let i = 0; i < pre; i++) addChips(rock, i === 0 ? 4 : 5);
+    colliders.push(rock);
+    rocks.push(rock);
+  }
+
+  function removeRock(rock) {
+    scene.remove(rock.mesh);
+    rock.chips.forEach(c => scene.remove(c));
+    colliders.splice(colliders.indexOf(rock), 1);
+    rocks.splice(rocks.indexOf(rock), 1);
+  }
+
+  // A ridge of rocks across the line from spawn to the landmark, with one gap
+  (function buildRidge() {
+    const len = Math.hypot(LANDMARK.x, LANDMARK.z);
+    const dx = LANDMARK.x / len, dz = LANDMARK.z / len;
+    const cx = dx * 14, cz = dz * 14;
+    const px = -dz, pz = dx;
+    for (let t = -11; t <= 9; t += 2.4) {
+      if (t > -3.2 && t < 0.8) continue; // the gap
+      const jt = t + (rand() - 0.5) * 0.8;
+      const off = (rand() - 0.5) * 1.6;
+      addRock(cx + px * jt + dx * off, cz + pz * jt + dz * off, 1.0 + rand() * 0.6);
+    }
+  })();
+
+  // Scattered rocks elsewhere
+  (function scatter() {
+    let placed = 0, tries = 0;
+    while (placed < 16 && tries < 400) {
+      tries++;
+      const x = (rand() * 2 - 1) * (MAP_HALF - 4);
+      const z = (rand() * 2 - 1) * (MAP_HALF - 4);
+      const r = 0.8 + rand() * 1.0;
+      if (Math.hypot(x, z) < 6) continue;
+      if (Math.hypot(x - LANDMARK.x, z - LANDMARK.z) < 9) continue;
+      if (colliders.some(c => Math.hypot(x - c.x, z - c.z) < c.r + r + 1.5)) continue;
+      addRock(x, z, r);
+      placed++;
+    }
+  })();
+
+  // ===================== Landmark: pillars around a gold crystal =====================
+  const landmark = new THREE.Group();
+  landmark.position.set(LANDMARK.x, 0, LANDMARK.z);
+  scene.add(landmark);
+
+  const stoneMat = new THREE.MeshStandardMaterial({ color: 0xb9b2a2, flatShading: true });
+  const floor = new THREE.Mesh(new THREE.CylinderGeometry(3.8, 3.8, 0.15, 24), new THREE.MeshStandardMaterial({ color: 0x8d8778 }));
+  floor.position.y = 0.075;
+  landmark.add(floor);
+
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
+    const px = Math.cos(a) * 3.2, pz = Math.sin(a) * 3.2;
+    const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.9, 3.2, 0.9), stoneMat);
+    pillar.position.set(px, 1.6, pz);
+    pillar.rotation.y = -a;
+    landmark.add(pillar);
+    colliders.push({ x: LANDMARK.x + px, z: LANDMARK.z + pz, r: 0.6 });
+  }
+
+  const CRYSTAL_R = 0.9;
+
+  const crystal = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.7, 0),
+    new THREE.MeshStandardMaterial({ color: 0xffc233, emissive: 0xffa000, emissiveIntensity: 0.7, flatShading: true })
+  );
+  crystal.scale.y = 1.7;
+  crystal.position.y = 1.9;
+  landmark.add(crystal);
+
+  // ===================== Pickaxe model (used on the ground and in hand) =====================
+  function buildPickaxeModel(glow) {
+    const g = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x8a5a2b });
+    const steel = new THREE.MeshStandardMaterial({ color: 0xc3d3e0, flatShading: true });
+    if (glow) {
+      wood.emissive = new THREE.Color(0x00a6b8); wood.emissiveIntensity = 0.55;
+      steel.emissive = new THREE.Color(0x19f0ff); steel.emissiveIntensity = 0.95;
+    }
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 1.1, 8), wood);
+    handle.position.y = 0.55;
+    g.add(handle);
+    // head lies in the swing plane (along local z)
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.45), steel);
+    head.position.y = 1.1;
+    g.add(head);
+    [1, -1].forEach(s => {
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.38, 6), steel);
+      tip.rotation.x = s * Math.PI / 2;
+      tip.position.set(0, 1.1, s * 0.4);
+      g.add(tip);
+    });
+    return g;
+  }
+
+  // Soft neon halo used under the pickaxe while it lies on the ground
+  const haloTex = (function () {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(64, 64, 4, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(120,255,255,0.95)');
+    grad.addColorStop(0.35, 'rgba(25,240,255,0.45)');
+    grad.addColorStop(1, 'rgba(25,240,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(c);
+  })();
+
+  // ===================== Character =====================
+  const character = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.5, 1.2, 16), new THREE.MeshStandardMaterial({ color: 0x2f6b4f }));
+  body.position.y = 0.6;
+  character.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.35, 16, 16), new THREE.MeshStandardMaterial({ color: 0xf2d6b3 }));
+  head.position.y = 1.35;
+  character.add(head);
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.35, 8), new THREE.MeshStandardMaterial({ color: 0xd94f4f }));
+  nose.position.set(0, 1.35, 0.35);
+  nose.rotation.x = Math.PI / 2;
+  character.add(nose);
+  const blob = new THREE.Mesh(new THREE.CircleGeometry(0.55, 24), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25 }));
+  blob.rotation.x = -Math.PI / 2;
+  blob.position.y = 0.02;
+  character.add(blob);
+
+  // Held pickaxe: a pivot at the shoulder that swings in the vertical plane in front of the body
+  const pickPivot = new THREE.Group();
+  pickPivot.add(buildPickaxeModel());
+  pickPivot.visible = false;
+  character.add(pickPivot);
+  const IDLE_ANGLE = 0.45;
+  let pickSide = 1;                       // +1 right, -1 left (character's own right is local -x)
+  function placePivot() { pickPivot.position.set(-pickSide * 0.55, 0.95, 0.05); }
+  placePivot();
+  pickPivot.rotation.x = IDLE_ANGLE;
+
+  character.position.set(0, 0, 0);
+  scene.add(character);
+
+  // ===================== Inventory (no HUD yet) =====================
+  const inventory = {};
+  const CAPS = { pickaxe: 1, stone: 100 };
+  const LABELS = { pickaxe: 'Pickaxe', stone: 'Stone' };
+  const invEl = document.getElementById('inv');
+
+  function renderInventory() {
+    invEl.textContent = '';
+    const names = Object.keys(inventory);
+    invEl.hidden = names.length === 0;
+    for (const name of names) {
+      const row = document.createElement('div');
+      const label = document.createElement('span');
+      label.textContent = LABELS[name] || name;
+      const count = document.createElement('span');
+      count.className = 'n';
+      count.textContent = inventory[name] + '/' + CAPS[name];
+      row.append(label, count);
+      invEl.appendChild(row);
+    }
+  }
+
+  // Anything over the cap is voided.
+  function give(name, n) {
+    inventory[name] = Math.min(CAPS[name], (inventory[name] || 0) + n);
+    renderInventory();
+  }
+
+  // ===================== Ground items =====================
+  const items = []; // {type, x, z, amount, mesh, revealed}
+  const itemGeo = new THREE.DodecahedronGeometry(0.2, 0);
+
+  function makeItem(type, x, z, amount) {
+    let mesh;
+    if (type === 'pickaxe') {
+      mesh = new THREE.Group();
+      const m = buildPickaxeModel(true);
+      m.rotation.z = Math.PI / 2;
+      m.position.set(-0.55, 0.15, 0);
+      mesh.add(m);
+      const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: haloTex, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false,
+      }));
+      halo.scale.set(3.4, 3.4, 1);
+      halo.position.y = 0.5;
+      halo.userData.halo = true;
+      mesh.add(halo);
+    } else {
+      mesh = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({ color: 0x8a8d8c, flatShading: true });
+      [[0, 0], [0.28, 0.1], [-0.2, 0.22], [0.05, -0.28]].forEach(([ox, oz], i) => {
+        const s = new THREE.Mesh(itemGeo, mat);
+        s.position.set(ox, 0.14, oz);
+        s.scale.setScalar(0.8 + i * 0.12);
+        s.rotation.set(i, i * 2, 0);
+        mesh.add(s);
+      });
+    }
+    mesh.position.set(x, 0, z);
+    scene.add(mesh);
+    const item = { type, x, z, amount, mesh, revealed: false };
+    items.push(item);
+    return item;
+  }
+
+  // ===================== Pickaxe spawn (triggered by touching the crystal) =====================
+  let pickState = 'dormant';             // dormant -> spawned -> held
+  let pickSpot = choosePickSpot();
+
+  function choosePickSpot() {
+    for (let i = 0; i < 200; i++) {
+      const x = (Math.random() * 2 - 1) * (MAP_HALF - 4);
+      const z = (Math.random() * 2 - 1) * (MAP_HALF - 4);
+      if (Math.hypot(x - LANDMARK.x, z - LANDMARK.z) < 15) continue;
+      if (Math.hypot(x, z) < 4) continue;
+      return { x, z };
+    }
+    return { x: -20, z: 20 };
+  }
+
+  function spawnPickaxe() {
+    pickState = 'spawned';
+    const { x, z } = pickSpot;
+    // Any rock too close to the spawn spot is simply destroyed (no stone).
+    for (const rk of rocks.slice()) {
+      if (Math.hypot(rk.x - x, rk.z - z) < rk.r + 1.0) removeRock(rk);
+    }
+    makeItem('pickaxe', x, z, 1);
+  }
+
+  function pickUp(item) {
+    scene.remove(item.mesh);
+    items.splice(items.indexOf(item), 1);
+    give(item.type, item.amount);
+    if (item.type === 'pickaxe') { pickState = 'held'; pickPivot.visible = true; }
+  }
+
+  // ===================== Sound (synthesised, partly directional) =====================
+  let audio = null;
+  function ensureAudio() {
+    if (!audio) {
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          const ctx = new AC();
+          const len = Math.floor(ctx.sampleRate * 0.6);
+          const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+          const d = buf.getChannelData(0);
+          for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+          audio = { ctx, noise: buf };
+        }
+      } catch (e) { audio = null; }
+    }
+    if (audio && audio.ctx.state === 'suspended') audio.ctx.resume();
+  }
+
+  const SOUNDS = {
+    crumble: { f: 1100, q: 0.9, dur: 0.16, thump: 110, vol: 0.55 },
+    break:   { f: 600,  q: 0.7, dur: 0.55, thump: 70,  vol: 0.9 },
+    solid:   { f: 2600, q: 6,   dur: 0.12, thump: 180, vol: 0.4 },
+  };
+
+  function playHit(kind, pan) {
+    if (!audio) return;
+    try {
+      const ctx = audio.ctx, t = ctx.currentTime, P = SOUNDS[kind];
+      const out = ctx.createGain();
+      out.gain.value = 1;
+      if (ctx.createStereoPanner) {
+        const sp = ctx.createStereoPanner();
+        sp.pan.value = pan;
+        out.connect(sp); sp.connect(ctx.destination);
+      } else {
+        out.connect(ctx.destination);
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = audio.noise;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass'; bp.frequency.value = P.f; bp.Q.value = P.q;
+      const ng = ctx.createGain();
+      ng.gain.setValueAtTime(P.vol, t);
+      ng.gain.exponentialRampToValueAtTime(0.001, t + P.dur);
+      src.connect(bp); bp.connect(ng); ng.connect(out);
+      src.start(t); src.stop(t + P.dur + 0.05);
+
+      const osc = ctx.createOscillator();
+      osc.type = kind === 'solid' ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(P.thump, t);
+      osc.frequency.exponentialRampToValueAtTime(P.thump * 0.45, t + 0.14);
+      const og = ctx.createGain();
+      og.gain.setValueAtTime(P.vol * 0.9, t);
+      og.gain.exponentialRampToValueAtTime(0.001, t + Math.max(0.14, P.dur * 0.8));
+      osc.connect(og); og.connect(out);
+      osc.start(t); osc.stop(t + P.dur + 0.1);
+    } catch (e) { /* sound is optional */ }
+  }
+
+  // ===================== Striking =====================
+  let swing = null; // {t, hit}
+
+  function easeOut(u) { return 1 - (1 - u) * (1 - u); }
+  function easeIn(u) { return u * u; }
+
+  function swingAngle(t) {
+    if (t < 0.12) return IDLE_ANGLE + (-0.55 - IDLE_ANGLE) * easeOut(t / 0.12);
+    if (t < HIT_TIME) return -0.55 + (2.3 + 0.55) * easeIn((t - 0.12) / (HIT_TIME - 0.12));
+    return 2.3 + (IDLE_ANGLE - 2.3) * easeOut(Math.min(1, (t - HIT_TIME) / (SWING_TIME - HIT_TIME)));
+  }
+
+  function strikeTarget() {
+    const p = character.position;
+    const fx = Math.sin(character.rotation.y), fz = Math.cos(character.rotation.y);
+    let best = null, bestGap = Infinity;
+    for (const rk of rocks) {
+      const dx = rk.x - p.x, dz = rk.z - p.z;
+      const d = Math.hypot(dx, dz);
+      const gap = d - rk.r;
+      if (gap > REACH) continue;
+      const cosA = Math.max(-1, Math.min(1, (dx * fx + dz * fz) / Math.max(d, 1e-6)));
+      const slack = Math.asin(Math.min(1, rk.r / Math.max(d, rk.r)));
+      if (Math.acos(cosA) > ARC_HALF + slack) continue;
+      if (gap < bestGap) { bestGap = gap; best = rk; }
+    }
+    return best;
+  }
+
+  const fwdTmp = new THREE.Vector3();
+  function panFor(rk) {
+    fwdTmp.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+    const rx = -fwdTmp.z, rz = fwdTmp.x;                   // camera-right on the ground
+    const dot = (rk.x - character.position.x) * rx + (rk.z - character.position.z) * rz;
+    return Math.max(-1, Math.min(1, dot / 2.5)) * 0.7;
+  }
+
+  function landHit() {
+    const rk = strikeTarget();
+    if (!rk) return;
+    const pan = panFor(rk);
+    rk.shake = 0.18;
+    if (!rk.breakable) { playHit('solid', pan); return; }
+    rk.hp--;
+    if (rk.hp <= 0) {
+      give('stone', rk.yield);
+      removeRock(rk);
+      playHit('break', pan);
+    } else {
+      addChips(rk, 5);
+      playHit('crumble', pan);
+    }
+  }
+
+  function startSwing() {
+    if (swing || pickState !== 'held') return;
+    swing = { t: 0, hit: false };
+  }
+
+  // ===================== Input =====================
+  const keys = Object.create(null);
+  const minimapWrap = document.getElementById('minimap-wrap');
+  const caption = document.getElementById('minimap-caption');
+  let minimapRotates = false;
+
+  function updateCaption() {
+    caption.textContent = minimapRotates ? 'Rotates with camera' : 'North-up';
+  }
+
+  window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+    ensureAudio();
+    if (e.repeat) return;
+    if (e.code === 'KeyM') minimapWrap.hidden = !minimapWrap.hidden;
+    if (e.code === 'KeyN') { minimapRotates = !minimapRotates; updateCaption(); }
+    if (e.code === 'KeyT' && pickState === 'held') { pickSide = -pickSide; placePivot(); }
+  });
+  window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+  window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+  let dragging = false, lastX = 0;
+  renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+  renderer.domElement.addEventListener('mousedown', (e) => { ensureAudio(); if (e.button === 2) { dragging = true; lastX = e.clientX; } });
+  window.addEventListener('mouseup', () => { dragging = false; });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    camYaw -= (e.clientX - lastX) * 0.006;
+    lastX = e.clientX;
+  });
+
+  // ===================== Toast =====================
+  const toast = document.getElementById('toast');
+  let toastTimer = 0;
+  function showToast(text) {
+    toast.textContent = text;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 3500);
+  }
+
+  // ===================== Reveal (explored map) =====================
+  const REV_PPM = 2;                                   // pixels per metre on the reveal layer
+  const revealCanvas = document.createElement('canvas');
+  revealCanvas.width = revealCanvas.height = MAP_HALF * 2 * REV_PPM;
+  const rctx = revealCanvas.getContext('2d');
+  const lastPaint = { x: 1e9, z: 1e9 };
+  let landmarkRevealed = false;
+
+  function paintReveal(p) {
+    const px = (p.x + MAP_HALF) * REV_PPM, pz = (p.z + MAP_HALF) * REV_PPM;
+    const rad = REVEAL_R * REV_PPM;
+    const g = rctx.createRadialGradient(px, pz, rad * 0.78, px, pz, rad);
+    g.addColorStop(0, '#5b9674');
+    g.addColorStop(1, 'rgba(91,150,116,0)');
+    rctx.fillStyle = g;
+    rctx.beginPath(); rctx.arc(px, pz, rad, 0, Math.PI * 2); rctx.fill();
+    lastPaint.x = p.x; lastPaint.z = p.z;
+  }
+
+  function updateReveal() {
+    const p = character.position;
+    if (Math.hypot(p.x - lastPaint.x, p.z - lastPaint.z) > 0.4) paintReveal(p);
+    for (const rk of rocks) {
+      if (!rk.revealed && Math.hypot(rk.x - p.x, rk.z - p.z) - rk.r < REVEAL_R) rk.revealed = true;
+    }
+    for (const it of items) {
+      if (!it.revealed && Math.hypot(it.x - p.x, it.z - p.z) < REVEAL_R) it.revealed = true;
+    }
+    if (!landmarkRevealed &&
+        Math.hypot(p.x - LANDMARK.x, p.z - LANDMARK.z) - LANDMARK_EDGE < REVEAL_R) {
+      landmarkRevealed = true;
+      showToast('Discovered: the Standing Stones');
+    }
+  }
+
+  // ===================== Minimap =====================
+  const mm = document.getElementById('minimap');
+  const mctx = mm.getContext('2d');
+  const MM_LOGICAL = 220;
+  let mmDisplay = 0;
+
+  function sizeMinimap() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const shown = mm.clientWidth || MM_LOGICAL;
+    mmDisplay = shown;
+    mm.width = Math.round(shown * dpr);
+    mm.height = Math.round(shown * dpr);
+  }
+
+  const COMPASS = [
+    ['N', 0, -1], ['NE', 1, -1], ['E', 1, 0], ['SE', 1, 1],
+    ['S', 0, 1], ['SW', -1, 1], ['W', -1, 0], ['NW', -1, -1],
+  ];
+
+  const cssCache = {};
+  function getCss(name) {
+    const cs = cssCache.cs || (cssCache.cs = getComputedStyle(document.documentElement));
+    return cs.getPropertyValue(name).trim() || 'rgba(14,22,18,0.94)';
+  }
+
+  function drawMinimap() {
+    if (minimapWrap.hidden) return;
+    const S = mmDisplay || MM_LOGICAL;
+    const k = mm.width / S;
+    mctx.setTransform(k, 0, 0, k, 0, 0);
+    mctx.clearRect(0, 0, S, S);
+
+    const cx = S / 2, R = S / 2 - 2;
+    const u = S / MM_LOGICAL;
+
+    mctx.fillStyle = getCss('--map-bg');
+    mctx.beginPath(); mctx.arc(cx, cx, R, 0, Math.PI * 2); mctx.fill();
+    mctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    mctx.lineWidth = 1;
+    mctx.stroke();
+
+    const fx = -Math.sin(camYaw), fz = -Math.cos(camYaw);
+    const alpha = Math.atan2(fz, fx);
+    const theta = minimapRotates ? (-Math.PI / 2 - alpha) : 0;
+
+    const half = (78 * u) / Math.SQRT2;
+    const scale = half / MAP_HALF;
+
+    mctx.save();
+    mctx.translate(cx, cx);
+    mctx.rotate(theta);
+
+    // unexplored ground, then the explored layer on top
+    mctx.fillStyle = '#26332c';
+    mctx.fillRect(-half, -half, half * 2, half * 2);
+    mctx.imageSmoothingEnabled = true;
+    mctx.drawImage(revealCanvas, -half, -half, half * 2, half * 2);
+    mctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    mctx.lineWidth = 1.5;
+    mctx.strokeRect(-half, -half, half * 2, half * 2);
+
+    mctx.fillStyle = '#4a5a52';
+    for (const r of rocks) {
+      if (!r.revealed) continue;
+      mctx.beginPath();
+      mctx.arc(r.x * scale, r.z * scale, Math.max(1.6, r.r * scale * 0.9), 0, Math.PI * 2);
+      mctx.fill();
+    }
+
+    if (landmarkRevealed) {
+      const lx = LANDMARK.x * scale, lz = LANDMARK.z * scale, s = 5 * u;
+      mctx.fillStyle = '#ffc233';
+      mctx.strokeStyle = '#6b4a00';
+      mctx.lineWidth = 1;
+      mctx.beginPath();
+      mctx.moveTo(lx, lz - s); mctx.lineTo(lx + s, lz); mctx.lineTo(lx, lz + s); mctx.lineTo(lx - s, lz);
+      mctx.closePath(); mctx.fill(); mctx.stroke();
+    }
+
+    for (const it of items) {
+      if (!it.revealed) continue;
+      const ix = it.x * scale, iz = it.z * scale, s = 3.6 * u;
+      mctx.lineWidth = 1;
+      if (it.type === 'pickaxe') {
+        mctx.fillStyle = '#7fd3ff';
+        mctx.strokeStyle = '#0b3550';
+        mctx.beginPath();
+        mctx.moveTo(ix, iz - s * 1.3); mctx.lineTo(ix + s, iz + s); mctx.lineTo(ix - s, iz + s);
+        mctx.closePath(); mctx.fill(); mctx.stroke();
+      } else {
+        mctx.fillStyle = '#d6dad8';
+        mctx.strokeStyle = '#3a4541';
+        mctx.fillRect(ix - s * 0.8, iz - s * 0.8, s * 1.6, s * 1.6);
+        mctx.strokeRect(ix - s * 0.8, iz - s * 0.8, s * 1.6, s * 1.6);
+      }
+    }
+
+    const px = character.position.x * scale, pz = character.position.z * scale;
+    mctx.fillStyle = 'rgba(255,255,255,0.28)';
+    mctx.beginPath();
+    mctx.moveTo(px, pz);
+    mctx.arc(px, pz, 17 * u, alpha - 0.55, alpha + 0.55);
+    mctx.closePath(); mctx.fill();
+
+    mctx.fillStyle = '#ff4d3d';
+    mctx.strokeStyle = '#ffffff';
+    mctx.lineWidth = 1.8;
+    mctx.beginPath(); mctx.arc(px, pz, 4.2 * u, 0, Math.PI * 2); mctx.fill(); mctx.stroke();
+    mctx.restore();
+
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    mctx.textAlign = 'center';
+    mctx.textBaseline = 'middle';
+    for (const [label, vx, vy] of COMPASS) {
+      const len = Math.hypot(vx, vy);
+      const ux = vx / len, uy = vy / len;
+      const rx = ux * cos - uy * sin, ry = ux * sin + uy * cos;
+      const rad = R - 12 * u;
+      const cardinal = label.length === 1;
+      mctx.font = (cardinal ? '700 ' : '500 ') + (cardinal ? 12 : 10) * u + 'px -apple-system, "Segoe UI", sans-serif';
+      mctx.fillStyle = label === 'N' ? '#ff7a6b' : (cardinal ? '#f1f5f2' : 'rgba(241,245,242,0.62)');
+      mctx.fillText(label, cx + rx * rad, cx + ry * rad);
+    }
+  }
+
+  // ===================== Helpers =====================
+  function lerpAngle(a, b, t) {
+    let d = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return a + d * t;
+  }
+
+  function resolveCollisions(pos) {
+    for (let iter = 0; iter < 3; iter++) {
+      for (const c of colliders) {
+        const dx = pos.x - c.x, dz = pos.z - c.z;
+        const min = c.r + PLAYER_R;
+        const d2 = dx * dx + dz * dz;
+        if (d2 >= min * min) continue;
+        const d = Math.sqrt(d2);
+        if (d < 1e-6) { pos.x += min; continue; }
+        const push = (min - d) / d;
+        pos.x += dx * push;
+        pos.z += dz * push;
+      }
+    }
+    const lim = MAP_HALF - PLAYER_R;
+    pos.x = Math.max(-lim, Math.min(lim, pos.x));
+    pos.z = Math.max(-lim, Math.min(lim, pos.z));
+  }
+
+  // ===================== Main loop =====================
+  const clock = new THREE.Clock();
+  const forward = new THREE.Vector3();
+  const right = new THREE.Vector3();
+  const move = new THREE.Vector3();
+
+  function frame() {
+    requestAnimationFrame(frame);
+    const dt = Math.min(clock.getDelta(), 0.05);
+    const time = clock.elapsedTime;
+
+    if (keys['KeyQ']) camYaw += ROTATE_SPEED * dt;
+    if (keys['KeyE']) camYaw -= ROTATE_SPEED * dt;
+
+    if (keys['KeyR']) startSwing();
+
+    if (swing) {
+      swing.t += dt;
+      if (!swing.hit && swing.t >= HIT_TIME) { swing.hit = true; landHit(); }
+      if (swing.t >= SWING_TIME) { swing = null; pickPivot.rotation.x = IDLE_ANGLE; }
+      else pickPivot.rotation.x = swingAngle(swing.t);
+    }
+
+    let inZ = 0, inX = 0;
+    if (!swing) {
+      if (keys['KeyW'] || keys['ArrowUp']) inZ += 1;
+      if (keys['KeyS'] || keys['ArrowDown']) inZ -= 1;
+      if (keys['KeyD'] || keys['ArrowRight']) inX += 1;
+      if (keys['KeyA'] || keys['ArrowLeft']) inX -= 1;
+    }
+
+    if (inX !== 0 || inZ !== 0) {
+      forward.set(-Math.sin(camYaw), 0, -Math.cos(camYaw));
+      right.set(-forward.z, 0, forward.x);
+      move.set(0, 0, 0).addScaledVector(forward, inZ).addScaledVector(right, inX);
+      move.normalize().multiplyScalar(MOVE_SPEED * dt);
+      character.position.add(move);
+      resolveCollisions(character.position);
+      character.rotation.y = lerpAngle(character.rotation.y, Math.atan2(move.x, move.z), 12 * dt);
+    }
+
+    // Touching the crystal (once) makes the pickaxe appear somewhere on the map
+    if (pickState === 'dormant' &&
+        Math.hypot(character.position.x - LANDMARK.x, character.position.z - LANDMARK.z) < CRYSTAL_R + PLAYER_R + 0.12) {
+      spawnPickaxe();
+    }
+
+    // Walk over an item to collect it
+    for (const it of items.slice()) {
+      if (Math.hypot(character.position.x - it.x, character.position.z - it.z) < 1.0) pickUp(it);
+    }
+
+    // Rock shake after a strike
+    for (const rk of rocks) {
+      if (rk.shake > 0) {
+        rk.shake = Math.max(0, rk.shake - dt);
+        const a = rk.shake / 0.18 * 0.07;
+        rk.mesh.position.set(rk.x + (Math.random() - 0.5) * a, rk.baseY, rk.z + (Math.random() - 0.5) * a);
+      }
+    }
+
+    // Items bob in place so they are easy to spot; the pickaxe halo pulses
+    for (const it of items) {
+      it.mesh.rotation.y = time * 0.8;
+      it.mesh.position.y = 0.08 + Math.sin(time * 2 + it.x) * 0.05;
+      it.mesh.children.forEach(ch => {
+        if (ch.userData.halo) ch.material.opacity = 0.65 + 0.3 * Math.sin(time * 3);
+      });
+    }
+
+    crystal.rotation.y = time * 0.9;
+    crystal.position.y = 1.9 + Math.sin(time * 1.6) * 0.15;
+
+    updateReveal();
+
+    const cp = ISO_PITCH;
+    camera.position.set(
+      character.position.x + CAM_DISTANCE * Math.cos(cp) * Math.sin(camYaw),
+      CAM_DISTANCE * Math.sin(cp),
+      character.position.z + CAM_DISTANCE * Math.cos(cp) * Math.cos(camYaw)
+    );
+    camera.lookAt(character.position.x, 0.8, character.position.z);
+
+    renderer.render(scene, camera);
+    drawMinimap();
+  }
+
+  // Test/debug hook
+  window.__game = {
+    character, colliders, rocks, items, inventory, LANDMARK, MAP_HALF,
+    get yaw() { return camYaw; }, set yaw(v) { camYaw = v; },
+    get pickState() { return pickState; },
+    get pickSpot() { return pickSpot; },
+    setPickSpot(x, z) { pickSpot = { x, z }; },
+    get landmarkRevealed() { return landmarkRevealed; },
+    get side() { return pickSide; },
+    get swinging() { return !!swing; },
+  };
+
+  resize();
+  sizeMinimap();
+  updateCaption();
+  window.addEventListener('resize', sizeMinimap);
+  updateReveal();
+  frame();
+})();
+</script>
+
+</body>
+</html>
