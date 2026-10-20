@@ -1,13 +1,5 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <title>Isometric Prototype</title>
-<style>html,body{margin:0}[hidden]{display:none!important}</style>
-</head>
-<body>
-
 <style>
   /* Layout: full-bleed 3D view, HUD top-left, minimap bottom-right. */
   :root {
@@ -466,7 +458,7 @@
   const itemGeo = new THREE.DodecahedronGeometry(0.2, 0);
 
   function makeItem(type, x, z, amount) {
-    let mesh;
+    let mesh, stonesGroup = null, label = null, labelCanvas = null, labelTex = null;
     if (type === 'pickaxe') {
       mesh = new THREE.Group();
       const m = buildPickaxeModel(true);
@@ -482,20 +474,68 @@
       mesh.add(halo);
     } else {
       mesh = new THREE.Group();
-      const mat = new THREE.MeshStandardMaterial({ color: 0x8a8d8c, flatShading: true });
-      [[0, 0], [0.28, 0.1], [-0.2, 0.22], [0.05, -0.28]].forEach(([ox, oz], i) => {
-        const s = new THREE.Mesh(itemGeo, mat);
-        s.position.set(ox, 0.14, oz);
-        s.scale.setScalar(0.8 + i * 0.12);
-        s.rotation.set(i, i * 2, 0);
-        mesh.add(s);
-      });
+      stonesGroup = new THREE.Group();
+      mesh.add(stonesGroup);
+      labelCanvas = document.createElement('canvas');
+      labelCanvas.width = 128; labelCanvas.height = 64;
+      labelTex = new THREE.CanvasTexture(labelCanvas);
+      label = new THREE.Sprite(new THREE.SpriteMaterial({ map: labelTex, transparent: true, depthTest: false, depthWrite: false }));
+      label.scale.set(1.1, 0.55, 1);
+      label.position.y = 1.0;
+      label.renderOrder = 10;
+      label.visible = false;
+      mesh.add(label);
     }
     mesh.position.set(x, 0, z);
     scene.add(mesh);
-    const item = { type, x, z, amount, mesh, revealed: false };
+    const item = { type, x, z, amount, mesh, revealed: false, born: performance.now() / 1000,
+                   stones: stonesGroup, label, labelCanvas, labelTex };
     items.push(item);
+    if (type === 'stone') refreshPile(item);
     return item;
+  }
+
+  // ----- Stone piles: dropped by broken rocks, collected by walking over them -----
+  const pileMat = new THREE.MeshStandardMaterial({ color: 0x8a8d8c, flatShading: true });
+  const PILE_OFFSETS = [[0, 0, 0.14], [0.28, 0.1, 0.14], [-0.2, 0.22, 0.14], [0.05, -0.28, 0.14],
+                        [0.38, -0.22, 0.14], [-0.34, -0.12, 0.14], [0.1, 0.42, 0.14], [0, 0.05, 0.38]];
+  // Visual size: 3 stones (small), 5 (medium), 8 (large); very big merged piles are drawn bigger still.
+  function pileStoneCount(a) { return a < 8 ? 3 : (a < 13 ? 5 : 8); }
+
+  function refreshPile(item) {
+    const g = item.stones;
+    while (g.children.length) g.remove(g.children[0]);
+    const n = pileStoneCount(item.amount);
+    for (let i = 0; i < n; i++) {
+      const [ox, oz, oy] = PILE_OFFSETS[i];
+      const st = new THREE.Mesh(itemGeo, pileMat);
+      st.position.set(ox, oy, oz);
+      st.scale.setScalar(0.8 + (i % 4) * 0.12);
+      st.rotation.set(i, i * 2, 0);
+      g.add(st);
+    }
+    g.scale.setScalar(item.amount >= 30 ? 1.25 : 1);
+    const c = item.labelCanvas.getContext('2d');
+    c.clearRect(0, 0, 128, 64);
+    c.font = '700 40px -apple-system, "Segoe UI", sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.lineWidth = 7; c.strokeStyle = 'rgba(10,16,13,0.9)';
+    c.strokeText(String(item.amount), 64, 32);
+    c.fillStyle = '#ffffff';
+    c.fillText(String(item.amount), 64, 32);
+    item.labelTex.needsUpdate = true;
+  }
+
+  // A new drop merges into any stone pile within 1 m
+  function dropStone(x, z, amount) {
+    const near = items.find(it => it.type === 'stone' && Math.hypot(it.x - x, it.z - z) < 1.0);
+    if (near) {
+      near.amount += amount;
+      near.born = performance.now() / 1000;
+      refreshPile(near);
+      return near;
+    }
+    return makeItem('stone', x, z, amount);
   }
 
   // ===================== Pickaxe spawn (triggered by touching the crystal) =====================
@@ -524,9 +564,18 @@
   }
 
   function pickUp(item) {
+    if (item.type === 'stone') {
+      // Take what fits under the cap; the rest stays on the ground.
+      const take = Math.min(CAPS.stone - (inventory.stone || 0), item.amount);
+      if (take <= 0) return;
+      give('stone', take);
+      item.amount -= take;
+      if (item.amount > 0) { refreshPile(item); return; }
+    } else {
+      give(item.type, item.amount);
+    }
     scene.remove(item.mesh);
     items.splice(items.indexOf(item), 1);
-    give(item.type, item.amount);
     if (item.type === 'pickaxe') { pickState = 'held'; pickPivot.visible = true; }
   }
 
@@ -635,7 +684,7 @@
     if (!rk.breakable) { playHit('solid', pan); return; }
     rk.hp--;
     if (rk.hp <= 0) {
-      give('stone', rk.yield);
+      dropStone(rk.x, rk.z, rk.yield);
       removeRock(rk);
       playHit('break', pan);
     } else {
@@ -805,21 +854,14 @@
     }
 
     for (const it of items) {
-      if (!it.revealed) continue;
+      if (it.type !== 'pickaxe' || !it.revealed) continue;   // stone piles are not mapped
       const ix = it.x * scale, iz = it.z * scale, s = 3.6 * u;
       mctx.lineWidth = 1;
-      if (it.type === 'pickaxe') {
-        mctx.fillStyle = '#7fd3ff';
-        mctx.strokeStyle = '#0b3550';
-        mctx.beginPath();
-        mctx.moveTo(ix, iz - s * 1.3); mctx.lineTo(ix + s, iz + s); mctx.lineTo(ix - s, iz + s);
-        mctx.closePath(); mctx.fill(); mctx.stroke();
-      } else {
-        mctx.fillStyle = '#d6dad8';
-        mctx.strokeStyle = '#3a4541';
-        mctx.fillRect(ix - s * 0.8, iz - s * 0.8, s * 1.6, s * 1.6);
-        mctx.strokeRect(ix - s * 0.8, iz - s * 0.8, s * 1.6, s * 1.6);
-      }
+      mctx.fillStyle = '#7fd3ff';
+      mctx.strokeStyle = '#0b3550';
+      mctx.beginPath();
+      mctx.moveTo(ix, iz - s * 1.3); mctx.lineTo(ix + s, iz + s); mctx.lineTo(ix - s, iz + s);
+      mctx.closePath(); mctx.fill(); mctx.stroke();
     }
 
     const px = character.position.x * scale, pz = character.position.z * scale;
@@ -938,12 +980,19 @@
     }
 
     // Items bob in place so they are easy to spot; the pickaxe halo pulses
+    const nowT = performance.now() / 1000;
     for (const it of items) {
-      it.mesh.rotation.y = time * 0.8;
-      it.mesh.position.y = 0.08 + Math.sin(time * 2 + it.x) * 0.05;
-      it.mesh.children.forEach(ch => {
-        if (ch.userData.halo) ch.material.opacity = 0.65 + 0.3 * Math.sin(time * 3);
-      });
+      if (it.type === 'pickaxe') {
+        it.mesh.rotation.y = time * 0.8;
+        it.mesh.position.y = 0.08 + Math.sin(time * 2 + it.x) * 0.05;
+        it.mesh.children.forEach(ch => {
+          if (ch.userData.halo) ch.material.opacity = 0.65 + 0.3 * Math.sin(time * 3);
+        });
+      } else {
+        const u = Math.min(1, (nowT - it.born) / 0.35);       // one small hop when dropped
+        it.mesh.position.y = 0.55 * 4 * u * (1 - u);
+        it.label.visible = Math.hypot(character.position.x - it.x, character.position.z - it.z) < 3.0;
+      }
     }
 
     crystal.rotation.y = time * 0.9;
@@ -965,7 +1014,7 @@
 
   // Test/debug hook
   window.__game = {
-    character, colliders, rocks, items, inventory, LANDMARK, MAP_HALF,
+    character, colliders, rocks, items, inventory, LANDMARK, MAP_HALF, dropStone,
     get yaw() { return camYaw; }, set yaw(v) { camYaw = v; },
     get pickState() { return pickState; },
     get pickSpot() { return pickSpot; },
@@ -984,5 +1033,4 @@
 })();
 </script>
 
-</body>
-</html>
+</body></html>
